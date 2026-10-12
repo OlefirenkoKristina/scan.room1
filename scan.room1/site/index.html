@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Кімната</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #14110f; overflow: hidden; font-family: system-ui, sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    #loader { position: fixed; inset: 0; display: grid; place-items: center; color: #e8e2d9; background: #14110f; transition: opacity .5s; }
+    #loader.done { opacity: 0; pointer-events: none; }
+    #bar { width: 220px; height: 4px; background: #3a342e; border-radius: 2px; overflow: hidden; margin-top: 12px; }
+    #bar i { display: block; height: 100%; width: 0; background: #e8e2d9; }
+    #hint { position: fixed; left: 16px; bottom: 16px; color: #e8e2d9aa; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="loader"><div><div id="pct">Завантаження… 0%</div><div id="bar"><i></i></div></div></div>
+  <div id="hint">Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув</div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
