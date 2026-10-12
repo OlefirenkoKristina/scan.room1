@@ -2,3 +2,8 @@
 *.blend1
 room_final_before_textures.blend
 room_final_v1.blend
+
+# Intermediate GLB exports (keep only web/room.glb, the web-optimized final)
+room_export.glb
+room_web.glb
+room_web2.glb
