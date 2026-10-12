@@ -1,0 +1,4 @@
+﻿# Blender auto-backups and intermediate versions
+*.blend1
+room_final_before_textures.blend
+room_final_v1.blend
