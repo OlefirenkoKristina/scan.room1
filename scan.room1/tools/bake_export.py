@@ -98,6 +98,12 @@ def rebuild_desk_end():
     log("rebuilt Meshy_Desk_end")
 if os.environ.get("REBUILD_DESK_END", "1") == "1": rebuild_desk_end()
 
+# --- 1c. all chairs black: reuse the black material of Meshy_Chair_2 (same mesh/UVs as the others) ---
+BLACK_CHAIRS = ["Meshy_Chair_1", "Meshy_Chair_blue"]
+_black = bpy.data.objects["Meshy_Chair_2"].data.materials[0]
+for name in BLACK_CHAIRS:
+    bpy.data.objects[name].data.materials[0] = _black
+
 # --- 1b. desks: weld UV seams, then flatten near-planar faces (removes the AI-mesh bumpiness) ---
 for name in DESKS:
     d = bpy.data.objects[name]; select_only(d)
