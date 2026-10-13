@@ -42,17 +42,34 @@ let walking = true, floorY = 0, room = null;
 let solids = [], floors = [];                    // furniture is deliberately NOT in solids: you can walk through it
 const ray = new THREE.Raycaster();
 const hint = document.getElementById('hint');
+
+// ---- VR-capable headsets (Quest, etc.): skip walk/orbit mode entirely and jump
+// straight into the immersive room on the first tap, no separate "Enter VR" step. ----
+let vrCapable = false;
+const vrReady = (async () => {
+  try { vrCapable = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')); } catch { vrCapable = false; }
+  if (vrCapable) {
+    hint.textContent = 'Торкніться екрана, щоб увійти у кімнату';
+    if (isTouch) document.getElementById('modeBtn').style.display = 'none';
+  }
+  return vrCapable;
+})();
+
 const setMode = (w) => {
   walking = w; controls.enabled = !w;
   if (!w && walk.isLocked) walk.unlock();
   if (w) { camera.rotation.z = 0; }
   document.body.classList.toggle('walking', w);
+  if (vrCapable) return;
   if (isTouch) { hint.textContent = w ? 'Лівий палець — ходити · правий — дивитись' : 'Один палець — обертати · щипок — наближення · два пальці — зсув'; return; }
   hint.textContent = w
     ? 'Клік — захопити мишу · WASD / стрілки — ходити · Shift — бігти · Esc — відпустити мишу · V — вільний огляд'
     : 'Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув · V — ходити';
 };
-canvas.addEventListener('click', () => { if (walking && !walk.isLocked) walk.lock(); });
+canvas.addEventListener('click', () => {
+  if (vrCapable) { vrButton.click(); return; }
+  if (walking && !walk.isLocked) walk.lock();
+});
 addEventListener('keydown', (e) => {
   if (e.code === 'KeyV' && !e.repeat) {
     if (walking) { setMode(false); controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(2)); }
@@ -70,7 +87,7 @@ if (isTouch) {
   const euler = new THREE.Euler(0, 0, 0, 'YXZ');
   let moveId = null, lookId = null, ox = 0, oy = 0, lx = 0, ly = 0;
   canvas.addEventListener('pointerdown', (e) => {
-    if (!walking || e.pointerType === 'mouse') return;
+    if (!walking || vrCapable || e.pointerType === 'mouse') return;
     canvas.setPointerCapture(e.pointerId);
     if (e.clientX < innerWidth / 2 && moveId === null) {
       moveId = e.pointerId; ox = e.clientX; oy = e.clientY;
@@ -147,7 +164,9 @@ function updateXR(dt) {
   if (hit) rig.position.y = hit.point.y;
 }
 
-document.body.appendChild(VRButton.createButton(renderer));
+const vrButton = VRButton.createButton(renderer);
+document.body.appendChild(vrButton);
+vrReady.then((capable) => { if (capable) vrButton.style.display = 'none'; });
 renderer.xr.addEventListener('sessionstart', () => {
   if (walking && walk.isLocked) walk.unlock();
   hint.style.display = 'none';
