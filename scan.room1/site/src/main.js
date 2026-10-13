@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 const canvas = document.createElement('canvas');
 document.body.prepend(canvas);
@@ -12,11 +13,20 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPrefere
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.NoToneMapping;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');     // headset height above the real floor = eye height in-scene
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x14110f);
 const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 100);
 let baseFov = 60;                                // vertical fov on landscape; widened on portrait phones so the view isn't a tunnel
+
+// ---- VR (WebXR): camera sits in a "rig" group. Outside VR we move the camera directly
+// (rig stays at identity, so nothing changes). In VR the headset fully drives the camera's
+// local pose each frame, so locomotion instead moves the rig underneath it. ----
+const rig = new THREE.Group();
+rig.add(camera);
+scene.add(rig);
 
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
@@ -98,6 +108,64 @@ function blocked(pos, dir) {                      // true if a wall/furniture is
   ray.set(new THREE.Vector3(pos.x, floorY + 0.5, pos.z), dir); ray.near = 0; ray.far = RADIUS;
   return ray.intersectObjects(solids, false).length > 0;
 }
+
+// ---- VR locomotion: left thumbstick walks (relative to where the headset looks),
+// right thumbstick snap-turns the rig. Eye height itself comes from the headset's own
+// local-floor tracking, so we only move the rig along the floor plane. ----
+const VR_SPEED = 1.6, SNAP_ANGLE = Math.PI / 4;
+let snapReady = true;
+const vrFwd = new THREE.Vector3(), vrSide = new THREE.Vector3(), vrMove = new THREE.Vector3();
+function axesOf(gp) {                              // 'xr-standard' gamepads report the thumbstick on axes[2],[3]
+  return gp.axes.length >= 4 ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
+}
+function updateXR(dt) {
+  if (!room) return;
+  const session = renderer.xr.getSession();
+  for (const src of session.inputSources) {
+    if (!src.gamepad || !src.handedness) continue;
+    const [ax, ay] = axesOf(src.gamepad);
+    if (src.handedness === 'left') {
+      if (Math.abs(ax) > 0.15 || Math.abs(ay) > 0.15) {
+        camera.getWorldDirection(vrFwd); vrFwd.y = 0; vrFwd.normalize();
+        vrSide.crossVectors(vrFwd, camera.up).normalize();
+        vrMove.set(0, 0, 0).addScaledVector(vrFwd, -ay).addScaledVector(vrSide, ax);
+        if (vrMove.lengthSq() > 1) vrMove.normalize();
+        vrMove.multiplyScalar(VR_SPEED * dt);
+        for (const axis of ['x', 'z']) {
+          const step = new THREE.Vector3(); step[axis] = vrMove[axis];
+          if (step[axis] !== 0 && !blocked(rig.position, step.clone().normalize())) rig.position[axis] += step[axis];
+        }
+      }
+    } else if (src.handedness === 'right') {
+      if (Math.abs(ax) > 0.6) { if (snapReady) { rig.rotation.y -= Math.sign(ax) * SNAP_ANGLE; snapReady = false; } }
+      else snapReady = true;
+    }
+  }
+  ray.set(new THREE.Vector3(rig.position.x, rig.position.y + 5, rig.position.z), new THREE.Vector3(0, -1, 0));
+  ray.near = 0; ray.far = 10;
+  const hit = ray.intersectObjects(floors, false)[0];
+  if (hit) rig.position.y = hit.point.y;
+}
+
+document.body.appendChild(VRButton.createButton(renderer));
+renderer.xr.addEventListener('sessionstart', () => {
+  if (walking && walk.isLocked) walk.unlock();
+  hint.style.display = 'none';
+  document.getElementById('modeBtn').style.display = 'none';
+  if (room) {
+    rig.position.set(camera.position.x, 0, camera.position.z);
+    ray.set(new THREE.Vector3(rig.position.x, camera.position.y + 5, rig.position.z), new THREE.Vector3(0, -1, 0));
+    ray.near = 0; ray.far = 10;
+    const hit = ray.intersectObjects(floors, false)[0];
+    rig.position.y = hit ? hit.point.y : 0;
+    rig.rotation.y = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ').y;
+  }
+});
+renderer.xr.addEventListener('sessionend', () => {
+  hint.style.display = '';
+  if (isTouch) document.getElementById('modeBtn').style.display = 'block';
+  rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);
+});
 function updateWalk(dt) {
   if (!room || !(walk.isLocked || isTouch)) return;
   const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + joy.y;
@@ -203,6 +271,8 @@ new GLTFLoader().load(base + 'room.glb?v=' + ASSET_VER, async (gltf) => {
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
-  if (walking) updateWalk(dt); else controls.update();
+  if (renderer.xr.isPresenting) updateXR(dt);
+  else if (walking) updateWalk(dt);
+  else controls.update();
   renderer.render(scene, camera);
 });
