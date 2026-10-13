@@ -34,6 +34,7 @@ scene.render.image_settings.color_mode = 'RGB'
 SCALE = float(os.environ.get("BAKE_SCALE", 1))
 ONLY = set(filter(None, os.environ.get("BAKE_ONLY", "").split(",")))
 GLASS_MATS = {"Glass", "Plastic_film"}
+FILL_BLACK = {"Wardrobe_frame"}
 GLOSSY_OBJS = {"Spot_Housing"}
 FLAT_MATS = {"PVC_White", "Handle_Metal"}
 TARGET = {"Meshy_Chair_1": 14000, "Meshy_Chair_2": 14000, "Meshy_Chair_blue": 14000,
@@ -180,6 +181,14 @@ for o in [o for o in list(scene.objects) if o.type == 'MESH' and not o.name.ends
     path = os.path.join(WORK, f"{o.name}.jpg")
     img.save_render(path, scene=scene)        # applies AgX + exposure => final look baked in
     bpy.data.images.remove(img)
+    if o.name in FILL_BLACK:                  # hidden/embedded faces bake to black squares: paint them with the median colour
+        import numpy as np
+        im = bpy.data.images.load(path); px = np.array(im.pixels[:]).reshape(-1, 4)
+        lum = px[:, :3].mean(1); lit = lum > 0.05
+        med = np.median(px[lit, :3], axis=0); bad = lum < 0.2 * np.median(lum[lit])
+        px[bad, :3] = med; im.pixels[:] = px.reshape(-1).tolist()
+        im.filepath_raw = path; im.file_format = 'JPEG'; im.save(); bpy.data.images.remove(im)
+        log("filled dark texels", o.name, int(bad.sum()))
     baked[o] = path
     log("baked", o.name, R, [s.material.name for s in o.material_slots])
 
