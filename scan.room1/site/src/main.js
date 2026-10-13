@@ -16,6 +16,7 @@ renderer.toneMapping = THREE.NoToneMapping;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x14110f);
 const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 100);
+let baseFov = 60;                                // vertical fov on landscape; widened on portrait phones so the view isn't a tunnel
 
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
@@ -25,6 +26,8 @@ controls.maxPolarAngle = Math.PI * 0.95;
 const walk = new PointerLockControls(camera, canvas);
 const EYE = 1.5, RADIUS = 0.3, SPEED = 1.6, RUN = 3.2;
 const keys = {};
+const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+const joy = { x: 0, y: 0 };                      // touch joystick, -1..1 (y>0 = forward)
 let walking = true, floorY = 0, room = null;
 let solids = [], floors = [];                    // furniture is deliberately NOT in solids: you can walk through it
 const ray = new THREE.Raycaster();
@@ -33,6 +36,8 @@ const setMode = (w) => {
   walking = w; controls.enabled = !w;
   if (!w && walk.isLocked) walk.unlock();
   if (w) { camera.rotation.z = 0; }
+  document.body.classList.toggle('walking', w);
+  if (isTouch) { hint.textContent = w ? 'Лівий палець — ходити · правий — дивитись' : 'Один палець — обертати · щипок — наближення · два пальці — зсув'; return; }
   hint.textContent = w
     ? 'Клік — захопити мишу · WASD / стрілки — ходити · Shift — бігти · Esc — відпустити мишу · V — вільний огляд'
     : 'Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув · V — ходити';
@@ -49,19 +54,59 @@ addEventListener('keydown', (e) => {
 addEventListener('keyup', (e) => { keys[e.code] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 
+// ---- touch: left half = virtual joystick, right half = look around; button toggles walk / orbit ----
+if (isTouch) {
+  const stick = document.getElementById('stick'), knob = stick.firstElementChild, R = 50;
+  const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+  let moveId = null, lookId = null, ox = 0, oy = 0, lx = 0, ly = 0;
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!walking || e.pointerType === 'mouse') return;
+    canvas.setPointerCapture(e.pointerId);
+    if (e.clientX < innerWidth / 2 && moveId === null) {
+      moveId = e.pointerId; ox = e.clientX; oy = e.clientY;
+      stick.style.cssText = `display:block;left:${ox - R}px;top:${oy - R}px`; knob.style.transform = '';
+    } else if (lookId === null) { lookId = e.pointerId; lx = e.clientX; ly = e.clientY; }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerId === moveId) {
+      let dx = e.clientX - ox, dy = e.clientY - oy; const d = Math.hypot(dx, dy);
+      if (d > R) { dx *= R / d; dy *= R / d; }
+      joy.x = dx / R; joy.y = -dy / R; knob.style.transform = `translate(${dx}px,${dy}px)`;
+    } else if (e.pointerId === lookId) {
+      euler.setFromQuaternion(camera.quaternion);
+      euler.y -= (e.clientX - lx) * 0.005;
+      euler.x = Math.max(-1.45, Math.min(1.45, euler.x - (e.clientY - ly) * 0.005));
+      camera.quaternion.setFromEuler(euler); lx = e.clientX; ly = e.clientY;
+    }
+  });
+  const up = (e) => {
+    if (e.pointerId === moveId) { moveId = null; joy.x = joy.y = 0; stick.style.display = 'none'; }
+    if (e.pointerId === lookId) lookId = null;
+  };
+  canvas.addEventListener('pointerup', up); canvas.addEventListener('pointercancel', up);
+  const btn = document.getElementById('modeBtn'); btn.style.display = 'block';
+  btn.addEventListener('click', () => {
+    if (walking) { setMode(false); controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(2)); }
+    else setMode(true);
+    btn.textContent = walking ? 'Огляд' : 'Ходити';
+  });
+  btn.textContent = 'Огляд';
+}
+
 const fwd = new THREE.Vector3(), side = new THREE.Vector3(), move = new THREE.Vector3(), dirs = [];
 function blocked(pos, dir) {                      // true if a wall/furniture is within RADIUS along dir
   ray.set(new THREE.Vector3(pos.x, floorY + 0.5, pos.z), dir); ray.near = 0; ray.far = RADIUS;
   return ray.intersectObjects(solids, false).length > 0;
 }
 function updateWalk(dt) {
-  if (!walk.isLocked || !room) return;
-  const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
-  const r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  if (!room || !(walk.isLocked || isTouch)) return;
+  const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) + joy.y;
+  const r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0) + joy.x;
   if (f || r) {
     camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
     side.crossVectors(fwd, camera.up).normalize();
-    move.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(side, r).normalize()
+    move.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(side, r);
+    move.multiplyScalar(1 / Math.max(1, move.length()))          // keep analog speed, cap diagonals at 1
         .multiplyScalar((keys.ShiftLeft || keys.ShiftRight ? RUN : SPEED) * dt);
     for (const axis of ['x', 'z']) {              // slide along walls: test each axis separately
       const step = new THREE.Vector3(); step[axis] = move[axis];
@@ -78,6 +123,11 @@ function updateWalk(dt) {
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
   camera.aspect = innerWidth / innerHeight;
+  applyFov();
+}
+function applyFov() {
+  const a = camera.aspect, hMin = 75 * Math.PI / 180;
+  camera.fov = a >= 1 ? baseFov : Math.max(baseFov, 2 * Math.atan(Math.tan(hMin / 2) / a) * 180 / Math.PI);
   camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();
@@ -133,7 +183,7 @@ new GLTFLoader().load(base + 'room.glb', async (gltf) => {
     const qb = zUpToYUp.multiply(new THREE.Quaternion(q[1], q[2], q[3], q[0]));
     const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(qb);
     controls.target.copy(camera.position).add(fwd.multiplyScalar(2));
-    camera.fov = camInfo.camera.fov || 60; camera.updateProjectionMatrix();
+    baseFov = camInfo.camera.fov || 60; applyFov();
   } else {
     camera.position.set(center.x, center.y, center.z + 3); controls.target.copy(center);
   }

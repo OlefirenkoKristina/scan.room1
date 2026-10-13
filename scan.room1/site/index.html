@@ -6,7 +6,11 @@
   <title>Кімната</title>
   <style>
     html, body { margin: 0; height: 100%; background: #14110f; overflow: hidden; font-family: system-ui, sans-serif; }
-    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; -webkit-user-select: none; user-select: none; }
+    #stick { display: none; position: fixed; width: 100px; height: 100px; border-radius: 50%; background: #ffffff22; border: 2px solid #ffffff55; pointer-events: none; }
+    #stick i { position: absolute; left: 30px; top: 30px; width: 40px; height: 40px; border-radius: 50%; background: #ffffff88; }
+    #modeBtn { display: none; position: fixed; right: 12px; top: 12px; padding: 8px 14px; border: 0; border-radius: 18px; background: #00000088; color: #e8e2d9; font: 14px system-ui, sans-serif; }
+    @media (pointer: coarse) { #hint { left: 12px; right: 12px; bottom: 10px; font-size: 12px; text-align: center; pointer-events: none; } }
     #loader { position: fixed; inset: 0; display: grid; place-items: center; color: #e8e2d9; background: #14110f; transition: opacity .5s; }
     #loader.done { opacity: 0; pointer-events: none; }
     #bar { width: 220px; height: 4px; background: #3a342e; border-radius: 2px; overflow: hidden; margin-top: 12px; }
@@ -16,6 +20,7 @@
 </head>
 <body>
   <div id="loader"><div><div id="pct">Завантаження… 0%</div><div id="bar"><i></i></div></div></div>
+  <div id="stick"><i></i></div><button id="modeBtn"></button>
   <div id="hint">Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув</div>
   <script type="module" src="/src/main.js"></script>
 </body>
