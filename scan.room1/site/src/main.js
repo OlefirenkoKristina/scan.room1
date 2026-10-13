@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const canvas = document.createElement('canvas');
@@ -20,6 +21,60 @@ const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 controls.maxPolarAngle = Math.PI * 0.95;
 
+// ---- walk mode (WASD + mouse look), default; V toggles free orbit view ----
+const walk = new PointerLockControls(camera, canvas);
+const EYE = 1.5, RADIUS = 0.3, SPEED = 1.6, RUN = 3.2;
+const keys = {};
+let walking = true, floorY = 0, room = null;
+let solids = [], floors = [];                    // furniture is deliberately NOT in solids: you can walk through it
+const ray = new THREE.Raycaster();
+const hint = document.getElementById('hint');
+const setMode = (w) => {
+  walking = w; controls.enabled = !w;
+  if (!w && walk.isLocked) walk.unlock();
+  if (w) { camera.rotation.z = 0; }
+  hint.textContent = w
+    ? 'Клік — захопити мишу · WASD / стрілки — ходити · Shift — бігти · Esc — відпустити мишу · V — вільний огляд'
+    : 'Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув · V — ходити';
+};
+canvas.addEventListener('click', () => { if (walking && !walk.isLocked) walk.lock(); });
+addEventListener('keydown', (e) => {
+  if (e.code === 'KeyV' && !e.repeat) {
+    if (walking) { setMode(false); controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(2)); }
+    else { setMode(true); }
+    return;
+  }
+  keys[e.code] = true;
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+const fwd = new THREE.Vector3(), side = new THREE.Vector3(), move = new THREE.Vector3(), dirs = [];
+function blocked(pos, dir) {                      // true if a wall/furniture is within RADIUS along dir
+  ray.set(new THREE.Vector3(pos.x, floorY + 0.5, pos.z), dir); ray.near = 0; ray.far = RADIUS;
+  return ray.intersectObjects(solids, false).length > 0;
+}
+function updateWalk(dt) {
+  if (!walk.isLocked || !room) return;
+  const f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
+  const r = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  if (f || r) {
+    camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+    side.crossVectors(fwd, camera.up).normalize();
+    move.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(side, r).normalize()
+        .multiplyScalar((keys.ShiftLeft || keys.ShiftRight ? RUN : SPEED) * dt);
+    for (const axis of ['x', 'z']) {              // slide along walls: test each axis separately
+      const step = new THREE.Vector3(); step[axis] = move[axis];
+      if (step[axis] !== 0 && !blocked(camera.position, step.clone().normalize())) camera.position[axis] += step[axis];
+    }
+  }
+  ray.set(new THREE.Vector3(camera.position.x, camera.position.y, camera.position.z), new THREE.Vector3(0, -1, 0));
+  ray.near = 0; ray.far = EYE + 1;
+  const hit = ray.intersectObjects(floors, false)[0];
+  if (hit) floorY = hit.point.y;
+  camera.position.y = floorY + EYE;
+}
+
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
   camera.aspect = innerWidth / innerHeight;
@@ -39,18 +94,34 @@ new GLTFLoader().load(base + 'room.glb', async (gltf) => {
     const old = o.material;
     // baked texture lives in emissiveMap -> plain unlit material, exact colours
     const map = old.emissiveMap || old.map;
-    if (map && old.name !== 'Glass_web') {
+    const isFilm = old.name.startsWith('Glass_web');
+    if (isFilm) {                                // frosted film (window glass, wardrobe doors): static milky see-through
+      o.material = new THREE.MeshBasicMaterial({
+        color: o.name === 'Wardrobe_film' ? 0xf4f1ea : 0xcfe6ee, transparent: true,
+        opacity: o.name === 'Wardrobe_film' ? 0.4 : 0.12, depthWrite: false,
+        polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,   // no z-fighting with the frame behind
+      });
+      o.renderOrder = 1; old.dispose();
+    } else if (o.name === 'Openings002') {      // window sill/frame: flat white, pulled forward so it can't flicker against neighbours
+      o.material = new THREE.MeshBasicMaterial({
+        color: 0xf2efe9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      });
+      old.dispose();
+    } else if (map) {
       map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = renderer.capabilities.getMaxAnisotropy();
       o.material = new THREE.MeshBasicMaterial({ map, side: THREE.FrontSide, toneMapped: false });
       old.dispose();
-    } else if (old.name === 'Glass_web') {
-      o.material = new THREE.MeshBasicMaterial({ color: 0xcfe6ee, transparent: true, opacity: 0.12, depthWrite: false });
     } else {                                     // flat baked colour (thin window-frame bars etc.)
       o.material = new THREE.MeshBasicMaterial({ color: old.emissive.clone(), toneMapped: false });
       old.dispose();
     }
   });
-  scene.add(gltf.scene);
+  scene.add(gltf.scene); room = gltf.scene;
+  gltf.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    if (/^Floor/.test(o.name)) floors.push(o);
+    else if (/^(Wall|Openings)/.test(o.name)) solids.push(o);
+  });
 
   const box = new THREE.Box3().setFromObject(gltf.scene);
   const center = box.getCenter(new THREE.Vector3());
@@ -67,9 +138,20 @@ new GLTFLoader().load(base + 'room.glb', async (gltf) => {
     camera.position.set(center.x, center.y, center.z + 3); controls.target.copy(center);
   }
   controls.update();
+  // start walking from the Blender camera spot, looking the same way, at eye height
+  ray.set(camera.position.clone(), new THREE.Vector3(0, -1, 0)); ray.near = 0; ray.far = 10;
+  const fh = ray.intersectObjects(floors, false)[0];
+  floorY = fh ? fh.point.y : box.min.y; camera.position.y = floorY + EYE;
+  camera.lookAt(camera.position.x + (controls.target.x - camera.position.x), camera.position.y, camera.position.z + (controls.target.z - camera.position.z));
+  setMode(true);
   document.getElementById('loader').classList.add('done');
 }, (e) => {
   if (e.total) { const p = Math.round(e.loaded / e.total * 100); pct.textContent = `Завантаження… ${p}%`; barFill.style.width = p + '%'; }
 }, (err) => { pct.textContent = 'Не вдалося завантажити сцену'; console.error(err); });
 
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (walking) updateWalk(dt); else controls.update();
+  renderer.render(scene, camera);
+});
