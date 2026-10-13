@@ -134,10 +134,11 @@ addEventListener('resize', resize); resize();
 
 const pct = document.getElementById('pct'), barFill = document.querySelector('#bar i');
 const base = import.meta.env.BASE_URL;
+const ASSET_VER = '3';                           // bump when room.glb / camera.json change, so browsers don't keep a cached copy
 
-const camPromise = fetch(base + 'camera.json').then(r => r.json()).catch(() => null);
+const camPromise = fetch(base + 'camera.json?v=' + ASSET_VER).then(r => r.json()).catch(() => null);
 
-new GLTFLoader().load(base + 'room.glb', async (gltf) => {
+new GLTFLoader().load(base + 'room.glb?v=' + ASSET_VER, async (gltf) => {
   const camInfo = await camPromise;
   gltf.scene.traverse((o) => {
     if (!o.isMesh) return;
