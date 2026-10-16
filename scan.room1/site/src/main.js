@@ -179,6 +179,14 @@ function axesOf(gp) {                              // 'xr-standard' gamepads rep
   return gp.axes.length >= 4 ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
 }
 const curve = (v) => Math.abs(v) < DEAD ? 0 : Math.sign(v) * ((Math.abs(v) - DEAD) / (1 - DEAD)) ** 2;   // gentle near centre
+function snapTurn(dir) {                           // ±90°, around the head (not the rig origin) so you stay in place
+  camera.getWorldPosition(headPos);
+  const a = dir * SNAP_ANGLE, dx = rig.position.x - headPos.x, dz = rig.position.z - headPos.z;
+  const c = Math.cos(a), s = Math.sin(a);
+  rig.position.x = headPos.x + dx * c + dz * s;
+  rig.position.z = headPos.z - dx * s + dz * c;
+  rig.rotation.y += a;
+}
 function updateXR(dt) {
   if (!room) return;
   const session = renderer.xr.getSession();
@@ -203,14 +211,8 @@ function updateXR(dt) {
     camera.getWorldPosition(headPos);              // collide where the head actually is (you can also step physically)
     if (Math.abs(step[axis]) > 1e-6 && !blocked(headPos, step.clone().normalize())) rig.position[axis] += step[axis];
   }
-  if (turn) {                                      // turn around the head, not the rig origin, so you stay in place
-    camera.getWorldPosition(headPos);
-    const a = turn * SNAP_ANGLE, dx = rig.position.x - headPos.x, dz = rig.position.z - headPos.z;
-    const c = Math.cos(a), s = Math.sin(a);
-    rig.position.x = headPos.x + dx * c + dz * s;
-    rig.position.z = headPos.z - dx * s + dz * c;
-    rig.rotation.y += a;
-  }
+  if (turn) snapTurn(turn);
+  updateHandAim();
   ray.set(new THREE.Vector3(rig.position.x, rig.position.y + 5, rig.position.z), new THREE.Vector3(0, -1, 0));
   ray.near = 0; ray.far = 10;
   const hit = ray.intersectObjects(floors, false)[0];
@@ -223,6 +225,14 @@ function updateXR(dt) {
 scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7a6a, 2.2));
 const handLight = new THREE.DirectionalLight(0xffffff, 1.2); handLight.position.set(1, 3, 2); scene.add(handLight);
 const controllerModels = new XRControllerModelFactory(), handModels = new XRHandModelFactory();
+// ---- hand tracking (no controllers): point at the floor and pinch (thumb + index) to
+// teleport there; pinch while pointing anywhere else (wall, air) to turn 90° toward that hand. ----
+const aims = [];
+const aimMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
+const aimRing = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthTest: false }));
+aimRing.renderOrder = 2; aimRing.visible = false; scene.add(aimRing);
+const aimRay = new THREE.Raycaster(), aimO = new THREE.Vector3(), aimD = new THREE.Vector3(), aimN = new THREE.Vector3();
 for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(controllerModels.createControllerModel(grip));
@@ -230,6 +240,42 @@ for (let i = 0; i < 2; i++) {
   const hand = renderer.xr.getHand(i);
   hand.add(handModels.createHandModel(hand, 'mesh'));
   rig.add(hand);
+  const ctrl = renderer.xr.getController(i);       // target-ray space: the same pointer ray Quest's own UI uses
+  rig.add(ctrl);
+  const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]), aimMat);
+  line.visible = false; scene.add(line);
+  const aim = { ctrl, line, isHand: false, side: '', target: null };
+  aims.push(aim);
+  ctrl.addEventListener('connected', (e) => { aim.isHand = !!e.data.hand; aim.side = e.data.handedness; });
+  ctrl.addEventListener('disconnected', () => { aim.isHand = false; aim.target = null; line.visible = false; });
+  hand.addEventListener('pinchstart', () => {
+    if (!aim.isHand || !room) return;
+    if (aim.target) {                                 // teleport: put the head (not the rig origin) above the target
+      camera.getWorldPosition(headPos);
+      rig.position.x += aim.target.x - headPos.x;
+      rig.position.z += aim.target.z - headPos.z;
+      rig.position.y = aim.target.y;
+    } else snapTurn(aim.side === 'left' ? 1 : -1);
+  });
+}
+function updateHandAim() {
+  aimRing.visible = false;
+  for (const aim of aims) {
+    aim.target = null; aim.line.visible = false;
+    if (!aim.isHand) continue;
+    aim.ctrl.getWorldPosition(aimO);
+    aimD.set(0, 0, -1).transformDirection(aim.ctrl.matrixWorld);
+    aimRay.set(aimO, aimD); aimRay.near = 0; aimRay.far = 8;
+    const hit = aimRay.intersectObjects([...floors, ...solids], false)[0];
+    if (!hit || !hit.face) continue;
+    aimN.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+    if (Math.abs(aimN.y) < 0.7 || hit.point.y > rig.position.y + 0.3) continue;   // only the floor, not walls / sills / ceiling
+    aim.target = hit.point.clone();
+    const pos = aim.line.geometry.attributes.position;
+    pos.setXYZ(0, aimO.x, aimO.y, aimO.z); pos.setXYZ(1, hit.point.x, hit.point.y, hit.point.z); pos.needsUpdate = true;
+    aim.line.geometry.computeBoundingSphere(); aim.line.visible = true;
+    aimRing.position.copy(hit.point).y += 0.01; aimRing.visible = true;
+  }
 }
 
 function placeRig() {                               // put the VR "feet" where the walk camera stands, facing the same way
@@ -328,7 +374,7 @@ new GLTFLoader().load(base + 'room.glb?v=' + ASSET_VER, async (gltf) => {
   scene.add(gltf.scene); room = gltf.scene;
   gltf.scene.traverse((o) => {
     if (!o.isMesh) return;
-    if (/^Floor/.test(o.name)) floors.push(o);
+    if (/^Floor/.test(o.name) || o.name === 'Openings005') floors.push(o);   // Openings005 = corridor floor
     else if (/^(Wall|Openings)/.test(o.name)) {
       // collision uses an invisible double-sided twin: some walls (e.g. the corridor's) face
       // the "wrong" way, and a one-sided raycast would let you walk straight through them
