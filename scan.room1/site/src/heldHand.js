@@ -19,13 +19,18 @@ export const POSES = {
   index: { point: { s: 75, p: 10, i: 0, d: 0 }, rest: { s: 75, p: 20, i: 20, d: 45 }, pull: { s: 65, p: 25, i: 30, d: 20 } },
   grip: { open: { p: 45, i: 40, d: 20 }, closed: { p: 90, i: 85, d: 35 } },
   thumb: {
-    up: { tl: -85, tm: -10, tp: -15, td: 5 },     // touching nothing: lifted off the face
+    up: { tl: -55, tm: -100, tp: 70, td: 70 },    // touching nothing: hovering ~1.5 cm over the stick
     stick: { tl: -30, tm: -80, tp: 60, td: 70 },
     a: { tl: -30, tm: -80, tp: 90, td: 80 },      // A / X (the button nearer the hand)
     b: { tl: -30, tm: -60, tp: 60, td: 70 },      // B / Y, also used for the thumbrest
     pressDrop: 8,                                  // degrees the thumb sinks when a button / the stick is clicked
   },
   knuckle: [-0.036, -0.028, 0.03],               // middle-finger knuckle in (left) grip space
+  // natural-hand touches: outer fingers curl a bit more (cascade), fingers fan out when relaxed
+  // and close up when gripping (spread, deg, open -> closed), and a faint idle sway (deg)
+  cascade: { middle: 1, ring: 1.06, pinky: 1.12 },
+  spread: { index: [6, 0], middle: [0, 0], ring: [-6, -2], pinky: [-14, -5] },
+  sway: 1.8,
 };
 
 const loader = new GLTFLoader();
@@ -67,7 +72,8 @@ export function createHeldHand(side) {
   const holder = new THREE.Group();
   // smoothed finger state, 0..1: index touch / index pull / grip / thumb weights per spot / thumb press
   const st = { it: 1, ip: 0, g: 1, up: 0, stick: 0, a: 0, b: 1, tp: 0 };
-  let apply = null;
+  let apply = null, time = Math.random() * 10;
+  const phase = { index: 0, middle: 1.7, ring: 3.1, pinky: 4.4, thumb: 2.3 };
   holder.userData.update = (gamepad, dt) => {
     if (!apply) return;
     const b = gamepad?.buttons || [];
@@ -81,8 +87,9 @@ export function createHeldHand(side) {
     };
     // xr-standard: 3 thumbstick, 4 A/X, 5 B/Y, 6 thumbrest
     target[touched(3) ? 'stick' : touched(4) ? 'a' : (touched(5) || touched(6)) ? 'b' : 'up'] = 1;
-    const k = 1 - Math.exp(-18 * dt);              // quick but not jumpy
+    const k = 1 - Math.exp(-14 * dt);              // quick but not jumpy
     for (const key in st) st[key] += (target[key] - st[key]) * k;
+    time += dt;
     apply(st);
   };
 
@@ -128,12 +135,19 @@ export function createHeldHand(side) {
     apply = (s) => {
       for (const nme in rest) { bone[nme].position.copy(rest[nme][0]); bone[nme].quaternion.copy(rest[nme][1]); }
       const I = POSES.index, G = POSES.grip, T = POSES.thumb;
-      finger('index', lerpPose(lerpPose(I.point, I.rest, s.it), I.pull, s.ip));
+      // idle sway: slow, out of phase per finger, fading out as the finger is clamped down
+      const sway = (f, amount) => POSES.sway * amount * Math.sin(time * 1.1 + phase[f]);
+      const fan = (f, closed) => POSES.spread[f][0] + (POSES.spread[f][1] - POSES.spread[f][0]) * closed;
+      const ip = lerpPose(lerpPose(I.point, I.rest, s.it), I.pull, s.ip), iw = sway('index', 1 - 0.7 * s.ip);
+      finger('index', { ...ip, s: ip.s + fan('index', s.it), p: ip.p + iw, i: ip.i + iw * 0.7 });
       const g = lerpPose(G.open, G.closed, s.g);
-      for (const f of ['middle', 'ring', 'pinky']) finger(f, g);
+      for (const f of ['middle', 'ring', 'pinky']) {
+        const c = POSES.cascade[f], w = sway(f, 1 - 0.75 * s.g);
+        finger(f, { s: fan(f, s.g), p: g.p * c + w, i: g.i * c + w * 0.7, d: g.d * c + w * 0.4 });
+      }
       const w = s.up + s.stick + s.a + s.b || 1, t = { tl: 0, tm: 0, tp: 0, td: 0 };
       for (const spot of ['up', 'stick', 'a', 'b']) for (const key in t) t[key] += T[spot][key] * s[spot] / w;
-      t.tl += T.pressDrop * s.tp;
+      t.tl += T.pressDrop * s.tp + sway('thumb', s.up) * 1.5;
       rot(THUMB, 0, along, t.tl * mirror);         // lift the whole thumb onto the controller's top face
       const ta = thumbAxis();
       rot(THUMB, 0, ta, t.tm); rot(THUMB, 1, ta, t.tp); rot(THUMB, 2, ta, t.td);
