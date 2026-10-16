@@ -1,20 +1,39 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-// A static hand gripping the controller. WebXR gives no hand pose while you hold
-// controllers, so we take the generic WebXR hand mesh, curl it into a fist with simple
-// forward kinematics on its (flat) joint bones, and line the fist up with the grip space:
-// grip -Z runs along the fist (out of the index-finger side), +Y toward the wrist.
+// A hand gripping the controller. WebXR gives no finger tracking while you hold controllers,
+// but Quest controllers report which buttons your fingers touch / press (capacitive sensors),
+// so the fingers are posed from that every frame, like Meta's own "hands on controllers":
+//   index  — off the trigger: pointing; touching: resting on it; pulling: curled by trigger value
+//   middle/ring/pinky — curl with the grip (squeeze) button
+//   thumb  — lifted when it touches nothing; on top when touching stick / A·B / thumbrest; pressed down on a click
+// The generic WebXR hand mesh has flat joint bones, so poses are simple forward kinematics.
+// The hand is lined up with grip space: -Z along the fist (out of the index side), +Y toward the wrist.
 const HAND_URL = 'https://cdn.jsdelivr.net/npm/@webxr-input-profiles/assets@1.0/dist/profiles/generic-hand/';
-// curl angles (deg) per joint, tl = thumb lift onto the top face; `knuckle` = where the
-// middle-finger knuckle sits in (left) grip space. Values are for the left hand; the right is mirrored.
-export const GRIP_POSE = { p: 90, i: 85, d: 35, tl: -55, tm: -20, tp: 0, td: 30, knuckle: [-0.036, -0.028, 0.03] };
+
+// Angles in degrees, for the left hand (the right is mirrored).
+// p/i/d = knuckle / middle / end joint bends, s = sideways swing of the index toward the trigger,
+// tl = thumb lift onto the top face, tm/tp/td = thumb joint bends.
+export const POSES = {
+  // fitted so the finger pads land on the real Touch Plus trigger / thumbstick / buttons
+  index: { point: { s: 75, p: 10, i: 0, d: 0 }, rest: { s: 75, p: 20, i: 20, d: 45 }, pull: { s: 65, p: 25, i: 30, d: 20 } },
+  grip: { open: { p: 45, i: 40, d: 20 }, closed: { p: 90, i: 85, d: 35 } },
+  thumb: {
+    up: { tl: -85, tm: -10, tp: -15, td: 5 },     // touching nothing: lifted off the face
+    stick: { tl: -30, tm: -80, tp: 60, td: 70 },
+    a: { tl: -30, tm: -80, tp: 90, td: 80 },      // A / X (the button nearer the hand)
+    b: { tl: -30, tm: -60, tp: 60, td: 70 },      // B / Y, also used for the thumbrest
+    pressDrop: 8,                                  // degrees the thumb sinks when a button / the stick is clicked
+  },
+  knuckle: [-0.036, -0.028, 0.03],               // middle-finger knuckle in (left) grip space
+};
 
 const loader = new GLTFLoader();
 const V = () => new THREE.Vector3();
+const lerpPose = (a, b, t) => Object.fromEntries(Object.keys(a).map((k) => [k, a[k] + (b[k] - a[k]) * t]));
 
 // Quest-style "ghost" hand: see-through grey body, bright rim at the silhouette, fading out
-// toward the wrist. Works for both the static held hand and the live tracked hand mesh.
+// toward the wrist. Works for both the held hand and the live tracked hand mesh.
 export function makeGhost(mesh) {
   const uniforms = { uWrist: { value: V() }, uDir: { value: new THREE.Vector3(0, 1, 0) } };
   const mat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: true });   // depthWrite: only the front layer shows, no overlapping fingers
@@ -40,48 +59,97 @@ export function makeGhost(mesh) {
   };
 }
 
-function curl(root, pose) {                       // returns the palm normal (rest pose, armature space)
-  const P = (n) => root.getObjectByName(n).position;
-  const a = P('middle-finger-phalanx-proximal').clone().sub(P('wrist'));
-  const b = P('pinky-finger-phalanx-proximal').clone().sub(P('index-finger-phalanx-proximal'));
-  const n = V().crossVectors(a, b).normalize();
-  if (n.dot(P('thumb-tip').clone().sub(P('middle-finger-metacarpal'))) < 0) n.negate();
-  const chain = (names, angles, fixedAxis) => {    // bend joint k, carrying every joint after it along
-    const axis = fixedAxis || V().crossVectors(P(names[1]).clone().sub(P(names[0])).normalize(), n).normalize();
-    angles.forEach((deg, k) => {
-      const pivot = P(names[k]).clone(), q = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(deg));
+const SEGS = ['phalanx-proximal', 'phalanx-intermediate', 'phalanx-distal', 'tip'];
+const THUMB = ['thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip'];
+
+export function createHeldHand(side) {
+  const mirror = side === 'right' ? -1 : 1;
+  const holder = new THREE.Group();
+  // smoothed finger state, 0..1: index touch / index pull / grip / thumb weights per spot / thumb press
+  const st = { it: 1, ip: 0, g: 1, up: 0, stick: 0, a: 0, b: 1, tp: 0 };
+  let apply = null;
+  holder.userData.update = (gamepad, dt) => {
+    if (!apply) return;
+    const b = gamepad?.buttons || [];
+    const touched = (i) => !!(b[i] && (b[i].touched || b[i].pressed));
+    const target = {
+      it: touched(0) ? 1 : 0,
+      ip: b[0]?.value || 0,
+      g: b[1] ? Math.max(b[1].value, b[1].touched ? 0.15 : 0) : 1,
+      up: 0, stick: 0, a: 0, b: 0,
+      tp: [3, 4, 5].some((i) => b[i]?.pressed) ? 1 : 0,
+    };
+    // xr-standard: 3 thumbstick, 4 A/X, 5 B/Y, 6 thumbrest
+    target[touched(3) ? 'stick' : touched(4) ? 'a' : (touched(5) || touched(6)) ? 'b' : 'up'] = 1;
+    const k = 1 - Math.exp(-18 * dt);              // quick but not jumpy
+    for (const key in st) st[key] += (target[key] - st[key]) * k;
+    apply(st);
+  };
+
+  loader.load(HAND_URL + side + '.glb', (gltf) => {
+    const hand = gltf.scene;
+    const bone = {};
+    hand.traverse((o) => { if (o.isBone) bone[o.name] = o; });
+    const rest = Object.fromEntries(Object.entries(bone).map(([n, o]) => [n, [o.position.clone(), o.quaternion.clone()]]));
+    const P = (n) => bone[n].position;
+
+    // fixed hand axes, from the rest pose
+    const a = P('middle-finger-phalanx-proximal').clone().sub(P('wrist'));
+    const c = P('pinky-finger-phalanx-proximal').clone().sub(P('index-finger-phalanx-proximal'));
+    const n = V().crossVectors(a, c).normalize();  // palm normal
+    if (n.dot(P('thumb-tip').clone().sub(P('middle-finger-metacarpal'))) < 0) n.negate();
+    const along = c.clone().negate().normalize();  // pinky -> index
+    const bendAxis = {};
+    for (const f of ['index', 'middle', 'ring', 'pinky']) {
+      bendAxis[f] = V().crossVectors(P(`${f}-finger-phalanx-intermediate`).clone().sub(P(`${f}-finger-phalanx-proximal`)).normalize(), n).normalize();
+    }
+    const thumbAxis = () => V().crossVectors(P(THUMB[1]).clone().sub(P(THUMB[0])).normalize(), n).normalize();
+
+    const q = new THREE.Quaternion();
+    const rot = (names, k, axis, deg) => {         // bend joint k of a chain, carrying every joint after it along
+      if (!deg) return;
+      const pivot = P(names[k]).clone();
+      q.setFromAxisAngle(axis, THREE.MathUtils.degToRad(deg));
       for (let j = k; j < names.length; j++) {
-        const o = root.getObjectByName(names[j]);
+        const o = bone[names[j]];
         if (j > k) o.position.sub(pivot).applyQuaternion(q).add(pivot);
         o.quaternion.premultiply(q);
       }
-    });
-  };
-  for (const f of ['index', 'middle', 'ring', 'pinky']) {
-    chain(['phalanx-proximal', 'phalanx-intermediate', 'phalanx-distal', 'tip'].map((s) => `${f}-finger-${s}`), [pose.p, pose.i, pose.d]);
-  }
-  const thumb = ['thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip'];
-  const along = P('index-finger-phalanx-proximal').clone().sub(P('pinky-finger-phalanx-proximal')).normalize();
-  chain(thumb, [pose.tl], along);                  // lift the whole thumb up onto the controller's top face
-  chain(thumb, [pose.tm, pose.tp, pose.td]);
-  return n;
-}
+    };
+    const swing = new THREE.Quaternion(), axis = V();
+    const finger = (f, pose) => {
+      const names = SEGS.map((s) => `${f}-finger-${s}`);
+      const sw = (pose.s || 0) * mirror;           // swing within the palm plane (toward the index side)
+      rot(names, 0, n, sw);
+      axis.copy(bendAxis[f]).applyQuaternion(swing.setFromAxisAngle(n, THREE.MathUtils.degToRad(sw)));
+      rot(names, 0, axis, pose.p); rot(names, 1, axis, pose.i); rot(names, 2, axis, pose.d);
+    };
 
-export function createHeldHand(side, pose = GRIP_POSE) {
-  if (side === 'right') pose = { ...pose, tl: -pose.tl, knuckle: [-pose.knuckle[0], pose.knuckle[1], pose.knuckle[2]] };
-  const holder = new THREE.Group();
-  loader.load(HAND_URL + side + '.glb', (gltf) => {
-    const hand = gltf.scene;
-    const P = (n) => hand.getObjectByName(n).position.clone();
-    const n = curl(hand, pose);
-    const Z = P('pinky-finger-phalanx-proximal').sub(P('index-finger-phalanx-proximal')).normalize();
-    const X = side === 'left' ? n.clone() : n.clone().negate();   // palm faces the body's midline
+    apply = (s) => {
+      for (const nme in rest) { bone[nme].position.copy(rest[nme][0]); bone[nme].quaternion.copy(rest[nme][1]); }
+      const I = POSES.index, G = POSES.grip, T = POSES.thumb;
+      finger('index', lerpPose(lerpPose(I.point, I.rest, s.it), I.pull, s.ip));
+      const g = lerpPose(G.open, G.closed, s.g);
+      for (const f of ['middle', 'ring', 'pinky']) finger(f, g);
+      const w = s.up + s.stick + s.a + s.b || 1, t = { tl: 0, tm: 0, tp: 0, td: 0 };
+      for (const spot of ['up', 'stick', 'a', 'b']) for (const key in t) t[key] += T[spot][key] * s[spot] / w;
+      t.tl += T.pressDrop * s.tp;
+      rot(THUMB, 0, along, t.tl * mirror);         // lift the whole thumb onto the controller's top face
+      const ta = thumbAxis();
+      rot(THUMB, 0, ta, t.tm); rot(THUMB, 1, ta, t.tp); rot(THUMB, 2, ta, t.td);
+    };
+
+    // line the hand up with grip space (knuckle positions don't depend on the finger pose)
+    const X = mirror > 0 ? n.clone() : n.clone().negate();   // palm faces the body's midline
+    const Z = along.clone().negate();
     X.sub(Z.clone().multiplyScalar(X.dot(Z))).normalize();
     const Y = V().crossVectors(Z, X);
-    const toGrip = new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(P('middle-finger-phalanx-proximal')).invert()
-      .premultiply(new THREE.Matrix4().makeTranslation(...pose.knuckle));
-    hand.matrixAutoUpdate = false; hand.matrix.copy(toGrip);
+    const k = POSES.knuckle;
+    hand.matrixAutoUpdate = false;
+    hand.matrix.makeBasis(X, Y, Z).setPosition(P('middle-finger-phalanx-proximal')).invert()
+      .premultiply(new THREE.Matrix4().makeTranslation(k[0] * mirror, k[1], k[2]));
     hand.traverse((o) => { if (o.isSkinnedMesh) makeGhost(o); });
+    apply(st);
     holder.add(hand);
   });
   return holder;

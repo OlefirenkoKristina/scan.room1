@@ -191,6 +191,7 @@ function snapTurn(dir) {                           // ±90°, around the head (n
 function updateXR(dt) {
   if (!room) return;
   const session = renderer.xr.getSession();
+  for (const { held, src } of heldHands) if (held && src && held.obj.visible) held.obj.userData.update(src.gamepad, dt);
   vrMove.set(0, 0, 0); let turn = 0;               // turn: -1 / 0 / +1 snap this frame
   for (const src of session.inputSources) {
     if (!src.gamepad || !src.handedness) continue;
@@ -228,7 +229,7 @@ const handLight = new THREE.DirectionalLight(0xffffff, 1.2); handLight.position.
 const controllerModels = new XRControllerModelFactory(), handModels = new XRHandModelFactory(null, (obj) => makeGhost(obj.getObjectByProperty('type', 'SkinnedMesh')));
 // ---- hand tracking (no controllers): point at the floor and pinch (thumb + index) to
 // teleport there; pinch while pointing anywhere else (wall, air) to turn 90° toward that hand. ----
-const aims = [];
+const aims = [], heldHands = [];
 const aimMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
 const aimRing = new THREE.Mesh(new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
   new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8, depthTest: false }));
@@ -238,16 +239,19 @@ for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(controllerModels.createControllerModel(grip));
   rig.add(grip);
-  // with controllers the headset stops tracking your fingers, so a hand gripping the controller is drawn instead
-  let held = null;
+  // with controllers the headset stops tracking your fingers, so a hand gripping the controller is drawn
+  // instead; its fingers follow the controller's touch / press sensors (see heldHand.js)
+  const slot = { held: null, src: null };
+  heldHands.push(slot);
   grip.addEventListener('connected', (e) => {
-    const side = e.data.handedness;
+    const side = e.data.handedness, held = slot.held;
+    slot.src = e.data;
     if (held && (e.data.hand || held.side !== side)) { held.obj.visible = false; }
     if (e.data.hand || (side !== 'left' && side !== 'right')) return;
-    if (!held || held.side !== side) { if (held) grip.remove(held.obj); held = { side, obj: createHeldHand(side) }; grip.add(held.obj); }
-    held.obj.visible = true;
+    if (!held || held.side !== side) { if (held) grip.remove(held.obj); slot.held = { side, obj: createHeldHand(side) }; grip.add(slot.held.obj); }
+    slot.held.obj.visible = true;
   });
-  grip.addEventListener('disconnected', () => { if (held) held.obj.visible = false; });
+  grip.addEventListener('disconnected', () => { slot.src = null; if (slot.held) slot.held.obj.visible = false; });
   const hand = renderer.xr.getHand(i);
   hand.add(handModels.createHandModel(hand, 'mesh'));
   rig.add(hand);
