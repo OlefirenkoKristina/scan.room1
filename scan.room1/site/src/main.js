@@ -4,7 +4,7 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
-import { createHeldHand } from './heldHand.js';
+import { createHeldHand, makeGhost } from './heldHand.js';
 
 const canvas = document.createElement('canvas');
 const app = document.getElementById('app');
@@ -225,7 +225,7 @@ function updateXR(dt) {
 // The room is unlit (baked), so these lights only affect the controller/hand models. ----
 scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7a6a, 2.2));
 const handLight = new THREE.DirectionalLight(0xffffff, 1.2); handLight.position.set(1, 3, 2); scene.add(handLight);
-const controllerModels = new XRControllerModelFactory(), handModels = new XRHandModelFactory();
+const controllerModels = new XRControllerModelFactory(), handModels = new XRHandModelFactory(null, (obj) => makeGhost(obj.getObjectByProperty('type', 'SkinnedMesh')));
 // ---- hand tracking (no controllers): point at the floor and pinch (thumb + index) to
 // teleport there; pinch while pointing anywhere else (wall, air) to turn 90° toward that hand. ----
 const aims = [];
