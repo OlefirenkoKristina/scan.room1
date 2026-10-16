@@ -164,14 +164,14 @@ function blocked(pos, dir) {                      // true if a wall/furniture is
 }
 
 // ---- VR locomotion: left thumbstick walks (relative to where the headset looks),
-// right thumbstick turns the rig smoothly. Eye height itself comes from the headset's own
+// right thumbstick snap-turns the rig by 90°. Eye height itself comes from the headset's own
 // local-floor tracking, so we only move the rig along the floor plane. ----
-const VR_SPEED = 0.8;                             // m/s at full stick — slow, calm walking pace
-const VR_TURN = THREE.MathUtils.degToRad(45);     // max turn speed, rad/s (smooth turn instead of 45° snaps)
+const VR_SPEED = 1.1;                             // m/s at full stick — calm walking pace
+const SNAP_ANGLE = Math.PI / 2;                   // right stick flick = turn 90°
 const DEAD = 0.2, EASE = 5;                       // stick dead-zone; how fast speed eases in/out (1/s)
 const vrFwd = new THREE.Vector3(), vrSide = new THREE.Vector3(), vrMove = new THREE.Vector3();
 const vrVel = new THREE.Vector3(), headPos = new THREE.Vector3();
-let vrYawRate = 0;
+let snapReady = true;
 function axesOf(gp) {                              // 'xr-standard' gamepads report the thumbstick on axes[2],[3]
   return gp.axes.length >= 4 ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
 }
@@ -179,7 +179,7 @@ const curve = (v) => Math.abs(v) < DEAD ? 0 : Math.sign(v) * ((Math.abs(v) - DEA
 function updateXR(dt) {
   if (!room) return;
   const session = renderer.xr.getSession();
-  vrMove.set(0, 0, 0); let turn = 0;
+  vrMove.set(0, 0, 0); let turn = 0;               // turn: -1 / 0 / +1 snap this frame
   for (const src of session.inputSources) {
     if (!src.gamepad || !src.handedness) continue;
     const [ax, ay] = axesOf(src.gamepad);
@@ -190,18 +190,18 @@ function updateXR(dt) {
       if (vrMove.lengthSq() > 1) vrMove.normalize();
       vrMove.multiplyScalar(VR_SPEED);
     } else if (src.handedness === 'right') {
-      turn = -curve(ax) * VR_TURN;
+      if (Math.abs(ax) > 0.6) { if (snapReady) { turn = -Math.sign(ax); snapReady = false; } }
+      else if (Math.abs(ax) < 0.3) snapReady = true;   // stick must come back to centre before the next 90°
     }
   }
-  const k = 1 - Math.exp(-EASE * dt);              // ease velocity and turn rate toward the stick, no jerks
-  vrVel.lerp(vrMove, k); vrYawRate += (turn - vrYawRate) * k;
+  vrVel.lerp(vrMove, 1 - Math.exp(-EASE * dt));    // ease velocity toward the stick, no jerks
   for (const axis of ['x', 'z']) {
     const step = new THREE.Vector3(); step[axis] = vrVel[axis] * dt;
     if (Math.abs(step[axis]) > 1e-6 && !blocked(rig.position, step.clone().normalize())) rig.position[axis] += step[axis];
   }
-  if (Math.abs(vrYawRate) > 1e-4) {                // turn around the head, not the rig origin, so the view doesn't swing
+  if (turn) {                                      // turn around the head, not the rig origin, so you stay in place
     camera.getWorldPosition(headPos);
-    const a = vrYawRate * dt, dx = rig.position.x - headPos.x, dz = rig.position.z - headPos.z;
+    const a = turn * SNAP_ANGLE, dx = rig.position.x - headPos.x, dz = rig.position.z - headPos.z;
     const c = Math.cos(a), s = Math.sin(a);
     rig.position.x = headPos.x + dx * c + dz * s;
     rig.position.z = headPos.z - dx * s + dz * c;
