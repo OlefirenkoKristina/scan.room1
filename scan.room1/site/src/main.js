@@ -4,6 +4,7 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+import { createHeldHand } from './heldHand.js';
 
 const canvas = document.createElement('canvas');
 const app = document.getElementById('app');
@@ -237,6 +238,16 @@ for (let i = 0; i < 2; i++) {
   const grip = renderer.xr.getControllerGrip(i);
   grip.add(controllerModels.createControllerModel(grip));
   rig.add(grip);
+  // with controllers the headset stops tracking your fingers, so a hand gripping the controller is drawn instead
+  let held = null;
+  grip.addEventListener('connected', (e) => {
+    const side = e.data.handedness;
+    if (held && (e.data.hand || held.side !== side)) { held.obj.visible = false; }
+    if (e.data.hand || (side !== 'left' && side !== 'right')) return;
+    if (!held || held.side !== side) { if (held) grip.remove(held.obj); held = { side, obj: createHeldHand(side) }; grip.add(held.obj); }
+    held.obj.visible = true;
+  });
+  grip.addEventListener('disconnected', () => { if (held) held.obj.visible = false; });
   const hand = renderer.xr.getHand(i);
   hand.add(handModels.createHandModel(hand, 'mesh'));
   rig.add(hand);
