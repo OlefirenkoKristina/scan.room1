@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 
 const canvas = document.createElement('canvas');
 const app = document.getElementById('app');
@@ -42,6 +44,7 @@ const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in win
 let rotated = false, W = innerWidth, H = innerHeight;
 const joy = { x: 0, y: 0 };                      // touch joystick, -1..1 (y>0 = forward)
 let walking = true, floorY = 0, room = null;
+const collideMat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
 let solids = [], floors = [];                    // furniture is deliberately NOT in solids: you can walk through it
 const ray = new THREE.Raycaster();
 const hint = document.getElementById('hint');
@@ -197,7 +200,8 @@ function updateXR(dt) {
   vrVel.lerp(vrMove, 1 - Math.exp(-EASE * dt));    // ease velocity toward the stick, no jerks
   for (const axis of ['x', 'z']) {
     const step = new THREE.Vector3(); step[axis] = vrVel[axis] * dt;
-    if (Math.abs(step[axis]) > 1e-6 && !blocked(rig.position, step.clone().normalize())) rig.position[axis] += step[axis];
+    camera.getWorldPosition(headPos);              // collide where the head actually is (you can also step physically)
+    if (Math.abs(step[axis]) > 1e-6 && !blocked(headPos, step.clone().normalize())) rig.position[axis] += step[axis];
   }
   if (turn) {                                      // turn around the head, not the rig origin, so you stay in place
     camera.getWorldPosition(headPos);
@@ -211,6 +215,21 @@ function updateXR(dt) {
   ray.near = 0; ray.far = 10;
   const hit = ray.intersectObjects(floors, false)[0];
   if (hit) rig.position.y = hit.point.y;
+}
+
+// ---- VR: show the controllers in your hands (or your hands themselves when hand tracking
+// is on). They live in the rig, so they move along with thumbstick walking / snap turns.
+// The room is unlit (baked), so these lights only affect the controller/hand models. ----
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a7a6a, 2.2));
+const handLight = new THREE.DirectionalLight(0xffffff, 1.2); handLight.position.set(1, 3, 2); scene.add(handLight);
+const controllerModels = new XRControllerModelFactory(), handModels = new XRHandModelFactory();
+for (let i = 0; i < 2; i++) {
+  const grip = renderer.xr.getControllerGrip(i);
+  grip.add(controllerModels.createControllerModel(grip));
+  rig.add(grip);
+  const hand = renderer.xr.getHand(i);
+  hand.add(handModels.createHandModel(hand, 'mesh'));
+  rig.add(hand);
 }
 
 function placeRig() {                               // put the VR "feet" where the walk camera stands, facing the same way
@@ -310,7 +329,15 @@ new GLTFLoader().load(base + 'room.glb?v=' + ASSET_VER, async (gltf) => {
   gltf.scene.traverse((o) => {
     if (!o.isMesh) return;
     if (/^Floor/.test(o.name)) floors.push(o);
-    else if (/^(Wall|Openings)/.test(o.name)) solids.push(o);
+    else if (/^(Wall|Openings)/.test(o.name)) {
+      // collision uses an invisible double-sided twin: some walls (e.g. the corridor's) face
+      // the "wrong" way, and a one-sided raycast would let you walk straight through them
+      o.updateWorldMatrix(true, false);
+      const twin = new THREE.Mesh(o.geometry, collideMat);
+      twin.matrixAutoUpdate = false; twin.matrixWorld.copy(o.matrixWorld);
+      solids.push(twin);
+    }
+    if (o.name === 'Openings007') o.material.side = THREE.DoubleSide;   // corridor walls: visible from both sides too
   });
 
   const box = new THREE.Box3().setFromObject(gltf.scene);
