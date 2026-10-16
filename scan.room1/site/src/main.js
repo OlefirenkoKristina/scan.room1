@@ -5,7 +5,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 const canvas = document.createElement('canvas');
-document.body.prepend(canvas);
+const app = document.getElementById('app');
+app.prepend(canvas);
 
 // Lighting is baked into the textures in Blender (AgX look included),
 // so no tone mapping / real-time lights: what you see is what Blender rendered.
@@ -37,6 +38,9 @@ const walk = new PointerLockControls(camera, canvas);
 const EYE = 1.5, RADIUS = 0.3, SPEED = 1.6, RUN = 3.2;
 const keys = {};
 const isTouch = matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window;
+// ---- phones are landscape by default: if the phone is held upright (and the browser
+// can't lock orientation, e.g. iOS), the whole #app is turned 90° so it still shows landscape. ----
+let rotated = false, W = innerWidth, H = innerHeight;
 const joy = { x: 0, y: 0 };                      // touch joystick, -1..1 (y>0 = forward)
 let walking = true, floorY = 0, room = null;
 let solids = [], floors = [];                    // furniture is deliberately NOT in solids: you can walk through it
@@ -61,7 +65,7 @@ const setMode = (w) => {
   if (w) { camera.rotation.z = 0; }
   document.body.classList.toggle('walking', w);
   if (vrCapable) return;
-  if (isTouch) { hint.textContent = w ? 'Лівий палець — ходити · правий — дивитись' : 'Один палець — обертати · щипок — наближення · два пальці — зсув'; return; }
+  if (isTouch) { hint.textContent = w ? 'Правий палець — ходити · лівий — дивитись' : 'Один палець — обертати · щипок — наближення · два пальці — зсув'; return; }
   hint.textContent = w
     ? 'Клік — захопити мишу · WASD / стрілки — ходити · Shift — бігти · Esc — відпустити мишу · V — вільний огляд'
     : 'Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув · V — ходити';
@@ -81,15 +85,34 @@ addEventListener('keydown', (e) => {
 addEventListener('keyup', (e) => { keys[e.code] = false; });
 addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 
-// ---- touch: left half = virtual joystick, right half = look around; button toggles walk / orbit ----
+// ---- touch: right half = virtual joystick, left half = look around; button toggles walk / orbit ----
 if (isTouch) {
+  // while #app is rotated, re-dispatch touches in the app's own (landscape) coordinates,
+  // so the joystick and OrbitControls see the same axes the user sees
+  const remap = (e) => {
+    if (!rotated || !e.isTrusted || e.target !== canvas) return;
+    e.stopImmediatePropagation();
+    canvas.dispatchEvent(new PointerEvent(e.type, {
+      pointerId: e.pointerId, pointerType: e.pointerType, isPrimary: e.isPrimary,
+      button: e.button, buttons: e.buttons, bubbles: true, cancelable: true,
+      clientX: e.clientY, clientY: innerWidth - e.clientX,
+    }));
+  };
+  for (const t of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) addEventListener(t, remap, true);
+  // first tap: go fullscreen and lock landscape where the browser allows it (Android Chrome)
+  canvas.addEventListener('pointerdown', () => {
+    if (vrCapable || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+    document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+      .then(() => screen.orientation?.lock?.('landscape')).catch(() => {});
+  }, { once: true });
+
   const stick = document.getElementById('stick'), knob = stick.firstElementChild, R = 50;
   const euler = new THREE.Euler(0, 0, 0, 'YXZ');
   let moveId = null, lookId = null, ox = 0, oy = 0, lx = 0, ly = 0;
   canvas.addEventListener('pointerdown', (e) => {
     if (!walking || vrCapable || e.pointerType === 'mouse') return;
     canvas.setPointerCapture(e.pointerId);
-    if (e.clientX < innerWidth / 2 && moveId === null) {
+    if (e.clientX > W / 2 && moveId === null) {
       moveId = e.pointerId; ox = e.clientX; oy = e.clientY;
       stick.style.cssText = `display:block;left:${ox - R}px;top:${oy - R}px`; knob.style.transform = '';
     } else if (lookId === null) { lookId = e.pointerId; lx = e.clientX; ly = e.clientY; }
@@ -166,7 +189,7 @@ function updateXR(dt) {
 
 const vrButton = VRButton.createButton(renderer);
 document.body.appendChild(vrButton);
-vrReady.then((capable) => { if (capable) vrButton.style.display = 'none'; });
+vrReady.then((capable) => { if (capable || isTouch) vrButton.style.display = 'none'; });   // phones: no "VR not supported" badge over the joystick
 renderer.xr.addEventListener('sessionstart', () => {
   if (walking && walk.isLocked) walk.unlock();
   hint.style.display = 'none';
@@ -208,8 +231,12 @@ function updateWalk(dt) {
 }
 
 function resize() {
-  renderer.setSize(innerWidth, innerHeight, false);
-  camera.aspect = innerWidth / innerHeight;
+  rotated = isTouch && !vrCapable && innerHeight > innerWidth;
+  W = rotated ? innerHeight : innerWidth; H = rotated ? innerWidth : innerHeight;
+  app.style.width = W + 'px'; app.style.height = H + 'px';
+  app.style.transform = rotated ? `translateX(${innerWidth}px) rotate(90deg)` : '';
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H;
   applyFov();
 }
 function applyFov() {
@@ -218,6 +245,7 @@ function applyFov() {
   camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();
+vrReady.then(resize);
 
 const pct = document.getElementById('pct'), barFill = document.querySelector('#bar i');
 const base = import.meta.env.BASE_URL;
