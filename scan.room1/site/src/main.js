@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 const canvas = document.createElement('canvas');
 const app = document.getElementById('app');
@@ -47,17 +46,32 @@ let solids = [], floors = [];                    // furniture is deliberately NO
 const ray = new THREE.Raycaster();
 const hint = document.getElementById('hint');
 
-// ---- VR-capable headsets (Quest, etc.): skip walk/orbit mode entirely and jump
-// straight into the immersive room on the first tap, no separate "Enter VR" step. ----
-let vrCapable = false;
+// ---- VR headsets (Quest, Pico, etc.): no "Enter VR" button and no website UI — the page
+// tries to open the immersive room by itself; if the browser insists on a user gesture,
+// the very first trigger press / tap anywhere enters it. ----
+const headsetUA = /OculusBrowser|Quest|Pico|Wolvic|VR/i.test(navigator.userAgent);
+let vrCapable = false, vrPending = false;
 const vrReady = (async () => {
   try { vrCapable = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')); } catch { vrCapable = false; }
+  if (!vrCapable && headsetUA && navigator.xr) vrCapable = true;   // some headset browsers under-report support
   if (vrCapable) {
-    hint.textContent = 'Торкніться екрана, щоб увійти у кімнату';
-    if (isTouch) document.getElementById('modeBtn').style.display = 'none';
+    hint.textContent = 'Натисніть курок або торкніться, щоб увійти у кімнату';
+    document.getElementById('modeBtn').style.display = 'none';
+    navigator.xr.addEventListener?.('sessiongranted', enterVR);    // arriving from another VR page: enter right away
+    enterVR();                                                      // works where no gesture is required
+    for (const t of ['pointerdown', 'click', 'keydown', 'touchstart']) addEventListener(t, enterVR, true);
   }
   return vrCapable;
 })();
+async function enterVR() {
+  if (!vrCapable || vrPending || renderer.xr.isPresenting) return;
+  vrPending = true;
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] });
+    await renderer.xr.setSession(session);
+  } catch { /* needs a user gesture — the next tap/trigger press retries */ }
+  vrPending = false;
+}
 
 const setMode = (w) => {
   walking = w; controls.enabled = !w;
@@ -71,7 +85,7 @@ const setMode = (w) => {
     : 'Ліва кнопка — обертати · колесо — наближення · права кнопка — зсув · V — ходити';
 };
 canvas.addEventListener('click', () => {
-  if (vrCapable) { vrButton.click(); return; }
+  if (vrCapable) return;
   if (walking && !walk.isLocked) walk.lock();
 });
 addEventListener('keydown', (e) => {
@@ -150,36 +164,48 @@ function blocked(pos, dir) {                      // true if a wall/furniture is
 }
 
 // ---- VR locomotion: left thumbstick walks (relative to where the headset looks),
-// right thumbstick snap-turns the rig. Eye height itself comes from the headset's own
+// right thumbstick turns the rig smoothly. Eye height itself comes from the headset's own
 // local-floor tracking, so we only move the rig along the floor plane. ----
-const VR_SPEED = 1.6, SNAP_ANGLE = Math.PI / 4;
-let snapReady = true;
+const VR_SPEED = 0.8;                             // m/s at full stick — slow, calm walking pace
+const VR_TURN = THREE.MathUtils.degToRad(45);     // max turn speed, rad/s (smooth turn instead of 45° snaps)
+const DEAD = 0.2, EASE = 5;                       // stick dead-zone; how fast speed eases in/out (1/s)
 const vrFwd = new THREE.Vector3(), vrSide = new THREE.Vector3(), vrMove = new THREE.Vector3();
+const vrVel = new THREE.Vector3(), headPos = new THREE.Vector3();
+let vrYawRate = 0;
 function axesOf(gp) {                              // 'xr-standard' gamepads report the thumbstick on axes[2],[3]
   return gp.axes.length >= 4 ? [gp.axes[2], gp.axes[3]] : [gp.axes[0], gp.axes[1]];
 }
+const curve = (v) => Math.abs(v) < DEAD ? 0 : Math.sign(v) * ((Math.abs(v) - DEAD) / (1 - DEAD)) ** 2;   // gentle near centre
 function updateXR(dt) {
   if (!room) return;
   const session = renderer.xr.getSession();
+  vrMove.set(0, 0, 0); let turn = 0;
   for (const src of session.inputSources) {
     if (!src.gamepad || !src.handedness) continue;
     const [ax, ay] = axesOf(src.gamepad);
     if (src.handedness === 'left') {
-      if (Math.abs(ax) > 0.15 || Math.abs(ay) > 0.15) {
-        camera.getWorldDirection(vrFwd); vrFwd.y = 0; vrFwd.normalize();
-        vrSide.crossVectors(vrFwd, camera.up).normalize();
-        vrMove.set(0, 0, 0).addScaledVector(vrFwd, -ay).addScaledVector(vrSide, ax);
-        if (vrMove.lengthSq() > 1) vrMove.normalize();
-        vrMove.multiplyScalar(VR_SPEED * dt);
-        for (const axis of ['x', 'z']) {
-          const step = new THREE.Vector3(); step[axis] = vrMove[axis];
-          if (step[axis] !== 0 && !blocked(rig.position, step.clone().normalize())) rig.position[axis] += step[axis];
-        }
-      }
+      camera.getWorldDirection(vrFwd); vrFwd.y = 0; vrFwd.normalize();
+      vrSide.crossVectors(vrFwd, camera.up).normalize();
+      vrMove.addScaledVector(vrFwd, -curve(ay)).addScaledVector(vrSide, curve(ax));
+      if (vrMove.lengthSq() > 1) vrMove.normalize();
+      vrMove.multiplyScalar(VR_SPEED);
     } else if (src.handedness === 'right') {
-      if (Math.abs(ax) > 0.6) { if (snapReady) { rig.rotation.y -= Math.sign(ax) * SNAP_ANGLE; snapReady = false; } }
-      else snapReady = true;
+      turn = -curve(ax) * VR_TURN;
     }
+  }
+  const k = 1 - Math.exp(-EASE * dt);              // ease velocity and turn rate toward the stick, no jerks
+  vrVel.lerp(vrMove, k); vrYawRate += (turn - vrYawRate) * k;
+  for (const axis of ['x', 'z']) {
+    const step = new THREE.Vector3(); step[axis] = vrVel[axis] * dt;
+    if (Math.abs(step[axis]) > 1e-6 && !blocked(rig.position, step.clone().normalize())) rig.position[axis] += step[axis];
+  }
+  if (Math.abs(vrYawRate) > 1e-4) {                // turn around the head, not the rig origin, so the view doesn't swing
+    camera.getWorldPosition(headPos);
+    const a = vrYawRate * dt, dx = rig.position.x - headPos.x, dz = rig.position.z - headPos.z;
+    const c = Math.cos(a), s = Math.sin(a);
+    rig.position.x = headPos.x + dx * c + dz * s;
+    rig.position.z = headPos.z - dx * s + dz * c;
+    rig.rotation.y += a;
   }
   ray.set(new THREE.Vector3(rig.position.x, rig.position.y + 5, rig.position.z), new THREE.Vector3(0, -1, 0));
   ray.near = 0; ray.far = 10;
@@ -187,25 +213,23 @@ function updateXR(dt) {
   if (hit) rig.position.y = hit.point.y;
 }
 
-const vrButton = VRButton.createButton(renderer);
-document.body.appendChild(vrButton);
-vrReady.then((capable) => { if (capable || isTouch) vrButton.style.display = 'none'; });   // phones: no "VR not supported" badge over the joystick
+function placeRig() {                               // put the VR "feet" where the walk camera stands, facing the same way
+  rig.position.set(camera.position.x, 0, camera.position.z);
+  ray.set(new THREE.Vector3(rig.position.x, camera.position.y + 5, rig.position.z), new THREE.Vector3(0, -1, 0));
+  ray.near = 0; ray.far = 10;
+  const hit = ray.intersectObjects(floors, false)[0];
+  rig.position.y = hit ? hit.point.y : 0;
+  rig.rotation.y = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ').y;
+}
 renderer.xr.addEventListener('sessionstart', () => {
   if (walking && walk.isLocked) walk.unlock();
   hint.style.display = 'none';
   document.getElementById('modeBtn').style.display = 'none';
-  if (room) {
-    rig.position.set(camera.position.x, 0, camera.position.z);
-    ray.set(new THREE.Vector3(rig.position.x, camera.position.y + 5, rig.position.z), new THREE.Vector3(0, -1, 0));
-    ray.near = 0; ray.far = 10;
-    const hit = ray.intersectObjects(floors, false)[0];
-    rig.position.y = hit ? hit.point.y : 0;
-    rig.rotation.y = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ').y;
-  }
+  if (room) placeRig();                              // otherwise done once the room finishes loading
 });
 renderer.xr.addEventListener('sessionend', () => {
   hint.style.display = '';
-  if (isTouch) document.getElementById('modeBtn').style.display = 'block';
+  if (isTouch && !vrCapable) document.getElementById('modeBtn').style.display = 'block';
   rig.position.set(0, 0, 0); rig.rotation.set(0, 0, 0);
 });
 function updateWalk(dt) {
@@ -310,6 +334,7 @@ new GLTFLoader().load(base + 'room.glb?v=' + ASSET_VER, async (gltf) => {
   floorY = fh ? fh.point.y : box.min.y; camera.position.y = floorY + EYE;
   camera.lookAt(camera.position.x + (controls.target.x - camera.position.x), camera.position.y, camera.position.z + (controls.target.z - camera.position.z));
   setMode(true);
+  if (renderer.xr.isPresenting) placeRig();          // entered VR while the room was still loading
   document.getElementById('loader').classList.add('done');
 }, (e) => {
   if (e.total) { const p = Math.round(e.loaded / e.total * 100); pct.textContent = `Завантаження… ${p}%`; barFill.style.width = p + '%'; }
